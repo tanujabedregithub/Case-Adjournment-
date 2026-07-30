@@ -1,0 +1,5 @@
+airflow/logs/
+spark-checkpoints/
+data/
+__pycache__/
+*.pyc
