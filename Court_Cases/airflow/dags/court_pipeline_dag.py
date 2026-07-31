@@ -43,17 +43,17 @@ run_aggregation = BashOperator(
     docker exec pipeline_spark_master \
     /opt/spark/bin/spark-submit \
     --master spark://spark-master:7077 \
-    --driver-memory 1g \
-    --executor-memory 2g \
-    --total-executor-cores 1 \
-    --conf spark.network.timeout=600s \
-    --conf spark.executor.heartbeatInterval=60s \
+    --driver-memory 2g \
+    --executor-memory 6g \
+    --total-executor-cores 2 \
+    --conf spark.network.timeout=1200s \
+    --conf spark.executor.heartbeatInterval=30s \
+    --conf spark.sql.shuffle.partitions=64 \
     --conf spark.jars.ivy=/tmp/.ivy2 \
     --packages org.postgresql:postgresql:42.6.0 \
     /opt/spark/work-dir/scripts/spark_aggregations.py
     """,
 )
-
 run_train_model = BashOperator(
     task_id="run_train_model",
     bash_command="python3 -u /opt/airflow/scripts/ml/train_model.py",

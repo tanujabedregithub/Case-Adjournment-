@@ -11,10 +11,10 @@ from pyspark import StorageLevel
 # ─────────────────────────────────────────
 spark = SparkSession.builder \
     .appName("CourtCase-Aggregations") \
-    .config("spark.jars.packages",
-            "org.postgresql:postgresql:42.6.0") \
-    .config("spark.network.timeout", "600s") \
-    .config("spark.executor.heartbeatInterval", "60s") \
+    .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0") \
+    .config("spark.network.timeout", "1200s") \
+    .config("spark.executor.heartbeatInterval", "30s") \
+    .config("spark.sql.shuffle.partitions", "64") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
@@ -41,17 +41,21 @@ PG_PROPS = {
 # ─────────────────────────────────────────
 print("Loading cases_cleaned...")
 
-df = spark.read.jdbc(
-    url=PG_URL,
-    table="cases_cleaned",
-    column="filing_year",
-    lowerBound=2010,
-    upperBound=2018,
-    numPartitions=2,
-    properties=PG_PROPS
-)
+df = spark.read \
+    .format("jdbc") \
+    .option("url", PG_URL) \
+    .option("dbtable", "cases_cleaned") \
+    .option("user", "court_user") \
+    .option("password", "court_password") \
+    .option("driver", "org.postgresql.Driver") \
+    .option("fetchsize", "10000") \
+    .option("partitionColumn", "filing_year") \
+    .option("lowerBound", 2010) \
+    .option("upperBound", 2018) \
+    .option("numPartitions", 8) \
+    .load()
 
-#df.persist(StorageLevel.MEMORY_AND_DISK)
+# df.persist(StorageLevel.MEMORY_AND_DISK)
 total = df.count()
 print(f"Total rows loaded: {total:,}")
 
@@ -435,5 +439,5 @@ print(f"Pending cases  : {total - resolved:,}")
 print("All summary tables saved to PostgreSQL")
 print("==========================================")
 
-#df.unpersist()
+# df.unpersist()
 spark.stop()

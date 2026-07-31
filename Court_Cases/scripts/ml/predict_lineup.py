@@ -3,7 +3,7 @@ import pickle
 import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine
-import gc
+
 
 # WHY pipeline_postgres, not localhost: same reason
 # as train_model.py -- this runs inside the Airflow
@@ -77,100 +77,103 @@ adjourn_count = 0
 
 print("Generating predictions...")
 
-for df in pd.read_sql(query, engine, chunksize=50000):
+# known_judges = set(le_judge.classes_)
+# known_cases = set(le_case.classes_)
 
-    print(f"Processing {len(df):,} rows...")
 
-    # Feature engineering
-    df['date_of_filing'] = pd.to_datetime(df['date_of_filing'])
-    df['filing_month'] = df['date_of_filing'].dt.month
-    df['filing_day_of_week'] = df['date_of_filing'].dt.dayofweek
+judge_map = {cls: idx for idx, cls in enumerate(le_judge.classes_)}
+case_map  = {cls: idx for idx, cls in enumerate(le_case.classes_)}
 
-    df['delay_cat_encoded'] = df['delay_category'].map({
-        'Fast': 0,
-        'Medium': 1,
-        'Slow': 2,
-        'Stuck': 3
-    })
+FEATURES = [
+    'filing_year',
+    'filing_month',
+    'filing_day_of_week',
+    'hearing_span_days',
+    'delay_cat_encoded',
+    'gender_encoded',
+    'judge_encoded',
+    'case_type_encoded'
+]
 
-    df['gender_encoded'] = df['petitioner_gender'].map({
-        'female': 1,
-        'male': 0,
-        'unknown': -1
-    })
+lineup_cols = [
+    'ddl_case_id',
+    'state_name',
+    'district_name',
+    'case_type',
+    'date_of_filing',
+    'date_next_list',
+    'case_age_days',
+    'delay_category',
+    'petitioner_gender',
+    'disposal_type',
+    'resolution_probability',
+    'predicted_outcome',
+    'predicted_days_remaining',
+    'prediction_date'
+]
 
-    known_judges = set(le_judge.classes_)
-    known_cases = set(le_case.classes_)
+# WHY a separate streaming connection: stream_results=True
+# triggers a Postgres server-side (named) cursor, which only
+# supports SELECT statements. Applying it to the whole engine
+# broke the CREATE TABLE issued later by to_sql(). Scoping it
+# to just this one connection keeps the SELECT streaming while
+# leaving to_sql()'s writes (which use the plain `engine`)
+# unaffected.
+with engine.connect().execution_options(stream_results=True) as stream_conn:
+    for df in pd.read_sql(query, stream_conn, chunksize=50000):
 
-    df['judge_encoded'] = df['judge_position'].fillna('unknown').apply(
-        lambda x: le_judge.transform([x])[0]
-        if x in known_judges else -1
-    )
+        print(f"Processing {len(df):,} rows...")
 
-    df['case_type_encoded'] = df['case_type'].fillna('unknown').apply(
-        lambda x: le_case.transform([x])[0]
-        if x in known_cases else -1
-    )
+        # Feature engineering
+        df['date_of_filing'] = pd.to_datetime(df['date_of_filing'])
+        df['filing_month'] = df['date_of_filing'].dt.month
+        df['filing_day_of_week'] = df['date_of_filing'].dt.dayofweek
 
-    FEATURES = [
-        'filing_year',
-        'filing_month',
-        'filing_day_of_week',
-        'hearing_span_days',
-        'delay_cat_encoded',
-        'gender_encoded',
-        'judge_encoded',
-        'case_type_encoded'
-    ]
+        df['delay_cat_encoded'] = df['delay_category'].map({
+            'Fast': 0,
+            'Medium': 1,
+            'Slow': 2,
+            'Stuck': 3
+        })
 
-    X = df[FEATURES].fillna(0)
+        df['gender_encoded'] = df['petitioner_gender'].map({
+            'female': 1,
+            'male': 0,
+            'unknown': -1
+        })
 
-    # Predictions
-    df['resolution_probability'] = cls_model.predict_proba(X)[:, 1]
+        df['judge_encoded'] = df['judge_position'].fillna('unknown').map(judge_map).fillna(-1).astype(int)
+        df['case_type_encoded'] = df['case_type'].fillna('unknown').map(case_map).fillna(-1).astype(int)
 
-    df['predicted_outcome'] = np.where(
-        df['resolution_probability'] >= 0.5,
-        'DISPOSE',
-        'ADJOURN'
-    )
+        X = df[FEATURES].fillna(0)
 
-    df['predicted_days_remaining'] = reg_model.predict(X)
-    df['prediction_date'] = pd.Timestamp.today().date()
+        # Predictions
+        df['resolution_probability'] = cls_model.predict_proba(X)[:, 1]
 
-    lineup_cols = [
-        'ddl_case_id',
-        'state_name',
-        'district_name',
-        'case_type',
-        'date_of_filing',
-        'date_next_list',
-        'case_age_days',
-        'delay_category',
-        'petitioner_gender',
-        'disposal_type',
-        'resolution_probability',
-        'predicted_outcome',
-        'predicted_days_remaining',
-        'prediction_date'
-    ]
+        df['predicted_outcome'] = np.where(
+            df['resolution_probability'] >= 0.5,
+            'DISPOSE',
+            'ADJOURN'
+        )
 
-    df[lineup_cols].to_sql(
-        'daily_lineup',
-        engine,
-        if_exists='replace' if first else 'append',
-        index=False
-    )
+        df['predicted_days_remaining'] = reg_model.predict(X)
+        df['prediction_date'] = pd.Timestamp.today().date()
 
-    first = False
+        df[lineup_cols].to_sql(
+            'daily_lineup',
+            engine,          # ← plain engine, not stream_conn
+            if_exists='replace' if first else 'append',
+            index=False
+        )
 
-    total_predictions += len(df)
-    dispose_count += (df['predicted_outcome'] == 'DISPOSE').sum()
-    adjourn_count += (df['predicted_outcome'] == 'ADJOURN').sum()
+        first = False
+
+        total_predictions += len(df)
+        dispose_count += (df['predicted_outcome'] == 'DISPOSE').sum()
+        adjourn_count += (df['predicted_outcome'] == 'ADJOURN').sum()
+
+        del df, X
 
 print(f"\nPredictions saved: {total_predictions:,} cases")
 print(f"Likely disposed today : {dispose_count:,}")
 print(f"Likely adjourned today: {adjourn_count:,}")
-
-del df
-gc.collect()
-

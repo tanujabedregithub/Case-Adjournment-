@@ -65,7 +65,7 @@ producer = KafkaProducer(
 TOPIC = 'court_cases_raw'
 BASE_PATH = '/opt/airflow/data/csv/cases'
 
-for year in range(2010, 2012):
+for year in range(2010, 2019):
     file_path = f"{BASE_PATH}/cases_{year}.csv"
 
     if not os.path.exists(file_path):
